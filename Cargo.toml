@@ -6,6 +6,7 @@ edition = "2024"
 [dependencies]
 anyhow = "1.0.98"
 prost = "0.13.5"
+rand = "0.9.1"
 thiserror = "2.0.12"
 tokio = { version = "1.45.0", features = ["full"] }
 tonic = "0.13.1"

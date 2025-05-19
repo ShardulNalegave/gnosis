@@ -2,13 +2,37 @@ syntax = "proto3";
 package gnosis_raft;
 
 service GnosisRaft {
-  rpc SayHello (HelloRequest) returns (HelloReply) {}
+  rpc RequestVote (RequestVoteReq) returns (RequestVoteRes) {}
+  rpc AppendEntries (AppendEntriesReq) returns (AppendEntriesRes) {}
 }
 
-message HelloRequest {
-  string name = 1;
+message RequestVoteReq {
+  uint32 term = 1;
+  uint32 candidateID = 2;
+  uint32 lastLogIndex = 3;
+  uint32 lastLogTerm = 4;
 }
 
-message HelloReply {
-  string message = 1;
+message RequestVoteRes {
+  uint32 term = 1;
+  bool voteGranted = 2;
+}
+
+message AppendEntriesReq {
+  uint32 term = 1;
+  uint32 leaderID = 2;
+  uint32 prevLogIndex = 3;
+  uint32 prevLogTerm = 4;
+  uint32 leaderCommit = 5;
+}
+
+message AppendEntriesRes {
+  uint32 term = 1;
+  bool success = 2;
+  repeated Entry entries = 3;
+}
+
+message Entry {
+  uint32 term = 1;
+  bytes payload = 2;
 }
