@@ -10,6 +10,8 @@ rand = "0.9.1"
 thiserror = "2.0.12"
 tokio = { version = "1.45.0", features = ["full"] }
 tonic = "0.13.1"
+tracing = "0.1.41"
+tracing-subscriber = "0.3.19"
 
 [build-dependencies]
 tonic-build = "0.13.1"

@@ -2,13 +2,15 @@
 // ===== Imports =====
 use std::sync::Arc;
 use std::collections::HashMap;
+use rand::random;
 use tokio::sync::Mutex;
-use tokio::time::Instant;
+use tokio::time::{Duration, Instant};
 use tonic::{Request, Response, Status};
 use crate::raft::proto::{
-    RequestVoteReq, RequestVoteRes,
-    AppendEntriesReq, AppendEntriesRes,
     gnosis_raft_server::GnosisRaft,
+    gnosis_raft_client::GnosisRaftClient,
+    AppendEntriesReq, AppendEntriesRes,
+    RequestVoteReq, RequestVoteRes
 };
 // ===================
 
@@ -54,107 +56,54 @@ impl Node {
         unimplemented!()
     }
 
-    // pub async fn start(&self) {
-    //     self.run_election_timer().await;
-    // }
+    pub async fn start(&self) {
+        tokio::spawn(run_election_timer(self.clone()));
+    }
 
-    // async fn run_election_timer(&self) {
-    //     let term_started = self.state.lock().await.current_term;
+    pub async fn start_election(&self) {
+        let mut state = self.state.lock().await;
 
-    //     let election_timeout = get_election_timeout_duration();
+        state.election_reset_event = Instant::now();
+        state.kind = NodeKind::Candidate;
+        state.current_term += 1;
+        state.voted_for = Some(state.id);
+        let saved_current_term = state.current_term;
+        let votes_received = Arc::new(Mutex::new(0));
 
-    //     let mut event_loop_timer = tokio::time::interval(
-    //         Duration::from_millis(10),
-    //     );
+        let majority_mark = state.peer_ids.len() / 2;
 
-    //     loop {
-    //         event_loop_timer.tick().await;
+        for &id in &state.peer_ids {
+            let peer_url = state.peer_urls[&id].clone();
+            let request = RequestVoteReq {
+                candidate_id: state.id,
+                term: saved_current_term,
+                last_log_index: 0, // TODO: Change from hard-coded to actual value
+                last_log_term: 0, // TODO: Change from hard-coded to actual value
+            };
+            let votes_received_mutex = votes_received.clone();
+            let mut node = self.clone();
 
-    //         let state = self.state.lock().await;
+            tokio::spawn(async move {
+                match request_vote(&mut node, peer_url, request, saved_current_term).await {
+                    Err(_) => {},
+                    Ok(result) => {
+                        let mut votes_received = votes_received_mutex.lock().await;
+                        if result {
+                            *votes_received += 1;
+                        }
 
-    //         // already a leader, no need for a election timer
-    //         if let NodeKind::Leader { .. } = state.kind {
-    //             drop(state);
-    //             return;
-    //         }
+                        if *votes_received > majority_mark {
+                            node.start_leader().await;
+                        }
+                    },
+                }
+            });
+        }
+    }
 
-    //         // the term has changed, bail out
-    //         if term_started != state.current_term {
-    //             drop(state);
-    //             return;
-    //         }
+    async fn start_leader(&self) {}
 
-    //         // we haven't heard from the leader for a duration more than the election timer, start a new election
-    //         if Instant::now().duration_since(state.election_reset_event) >= election_timeout {
-    //             drop(state);
-    //             // self.start_election().await;
-    //             return;
-    //         }
-
-    //         drop(state);
-    //     }
-    // }
-
-    // pub async fn start_election(&self) {
-    //     let mut state = self.state.lock().await;
-
-    //     state.election_reset_event = Instant::now();
-    //     state.kind = NodeKind::Candidate;
-    //     state.current_term += 1;
-    //     state.voted_for = Some(self.id);
-    //     let saved_current_term = state.current_term;
-    //     let mut votes_received = Arc::new(Mutex::new(0));
-
-    //     for id in &self.peer_ids {
-    //         // TODO: Send `RequestVote` RPCs to all member nodes
-
-    //         let peer_url = self.peer_urls[id].clone();
-    //         let request = RequestVoteReq {
-    //             candidate_id: self.id,
-    //             term: saved_current_term,
-    //             last_log_index: 0, // TODO: Change from hard-coded to actual value
-    //             last_log_term: 0, // TODO: Change from hard-coded to actual value
-    //         };
-    //         let state_mutex = self.state.clone();
-    //         let votes_received_mutex = votes_received.clone();
-    //         let num_peers = self.peer_ids.len();
-
-    //         tokio::spawn(async move {
-    //             let mut client = GnosisRaftClient::connect(peer_url).await.unwrap();
-    //             let result = client.request_vote(request).await.unwrap().into_inner();
-    //             let state = state_mutex.lock().await;
-
-    //             match state.kind {
-    //                 NodeKind::Candidate | NodeKind::Follower => {
-    //                     drop(state);
-    //                     return;
-    //                 },
-    //                 _ => {},
-    //             }
-
-    //             if result.term > saved_current_term {
-    //                 drop(state);
-    //                 return;
-    //             }
-
-    //             if result.term == saved_current_term && result.vote_granted {
-    //                 let mut votes_received = votes_received_mutex.lock().await;
-    //                 *votes_received += 1;
-
-    //                 if 2 * *votes_received > num_peers + 1 {
-    //                     drop(votes_received);
-    //                     drop(state);
-    //                     return;
-    //                 }
-    //             }
-
-    //             drop(state);
-    //         });
-    //     }
-    // }
-
-    // async fn become_follower(&self) {}
-    // async fn start_leader(&self) {}
+    async fn become_follower(&self) {}
 }
 
 #[tonic::async_trait]
@@ -172,4 +121,78 @@ impl GnosisRaft for Node {
     ) -> Result<Response<AppendEntriesRes>, Status> {
         unimplemented!()
     }
+}
+
+/// Returns a `Duration` between 150-300ms
+fn get_election_timeout_duration() -> Duration {
+    Duration::from_millis(150 + ((150.0 * random::<f64>()) as u64))
+}
+
+/// Runs an election timer which starts a new election from the given node.
+/// This method should be run in a separate thread with a clone of the node.
+pub async fn run_election_timer(node: Node) {
+    let term_started = {
+        let state = node.state.lock().await;
+        state.current_term
+    };
+
+    let election_timeout = get_election_timeout_duration();
+
+    // event loop
+    let mut ticker = tokio::time::interval(Duration::from_millis(10));
+    loop {
+        ticker.tick().await;
+        let state = node.state.lock().await;
+
+        if let NodeKind::Leader { .. } = state.kind {
+            drop(state);
+            return;
+        }
+
+        if state.current_term != term_started {
+            drop(state);
+            return;
+        }
+
+        if Instant::now().duration_since(state.election_reset_event) >= election_timeout {
+            drop(state);
+            // node.start_election().await;
+            return;
+        }
+
+        drop(state);
+    }
+}
+
+pub async fn request_vote(
+    node: &mut Node,
+    peer_url: String,
+    request: RequestVoteReq,
+    saved_current_term: u32,
+) -> anyhow::Result<bool> {
+    let mut client = GnosisRaftClient::connect(peer_url).await?;
+    let result = client.request_vote(request).await?.into_inner();
+
+    let state = node.state.lock().await;
+
+    match state.kind {
+        NodeKind::Leader { .. } | NodeKind::Follower => {
+            drop(state);
+            return Ok(false);
+        },
+        _ => {},
+    }
+
+    if result.term > saved_current_term {
+        drop(state);
+        return Ok(false);
+    }
+
+    if result.term == saved_current_term && result.vote_granted {
+        drop(state);
+        return Ok(true);
+    }
+
+    drop(state);
+    Ok(false)
 }
